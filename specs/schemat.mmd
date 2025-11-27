@@ -1,0 +1,99 @@
+graph TB
+    subgraph "User Interface"
+        CLI[CLI Interface - argparse]
+    end
+
+    subgraph "Commands"
+        CMD_ADD[add --amount --category --description]
+        CMD_STATUS[status]
+        CMD_APPLY[apply-fixed]
+        CMD_LIST[list]
+    end
+
+    subgraph "Core Functions"
+        VALIDATE_AMT[validate_amount]
+        VALIDATE_STR[validate_string]
+        ADD_TX[add_transaction]
+        APPLY_FIXED[apply_fixed_costs]
+        CALC_TOTAL[calculate_total]
+        FILTER_MONTH[filter_by_month]
+        GROUP_CAT[group_by_category]
+        FORMAT_STATUS[format_status]
+        FORMAT_LIST[format_category_list]
+        GET_MONTH[get_current_month]
+    end
+
+    subgraph "Storage Layer"
+        LOAD[load_data]
+        SAVE[save_data]
+        CREATE_EMPTY[create_empty_data]
+        BACKUP[Backup - shutil.copy2]
+    end
+
+    subgraph "Data File"
+        JSON[(data/data.json)]
+        BAK[(data/data.json.bak)]
+    end
+
+    subgraph "Error Handling"
+        ERR_JSON[JSONDecodeError]
+        ERR_PERM[PermissionError]
+        ERR_VAL[ValueError]
+    end
+
+    subgraph "Data Schema"
+        SCHEMA["<br/>limit: 5000<br/>transactions: []<br/>  - date: YYYY-MM-DD<br/>  - amount: float<br/>  - category: string<br/>  - description: string<br/>fixed_costs: []<br/>  - amount: float<br/>  - category: string<br/>  - description: string<br/>"]
+    end
+
+    CLI --> CMD_ADD
+    CLI --> CMD_STATUS
+    CLI --> CMD_APPLY
+    CLI --> CMD_LIST
+
+    CMD_ADD --> VALIDATE_AMT
+    CMD_ADD --> VALIDATE_STR
+    VALIDATE_AMT --> ADD_TX
+    VALIDATE_STR --> ADD_TX
+    VALIDATE_AMT -.błąd.-> ERR_VAL
+
+    CMD_STATUS --> LOAD
+    CMD_STATUS --> GET_MONTH
+    CMD_STATUS --> FILTER_MONTH
+    CMD_STATUS --> CALC_TOTAL
+    CMD_STATUS --> FORMAT_STATUS
+
+    CMD_APPLY --> LOAD
+    CMD_APPLY --> APPLY_FIXED
+    APPLY_FIXED --> SAVE
+
+    CMD_LIST --> LOAD
+    CMD_LIST --> GET_MONTH
+    CMD_LIST --> FILTER_MONTH
+    CMD_LIST --> GROUP_CAT
+    CMD_LIST --> FORMAT_LIST
+
+    ADD_TX --> SAVE
+
+    LOAD --> JSON
+    LOAD -.nie istnieje.-> CREATE_EMPTY
+    LOAD -.uszkodzony.-> ERR_JSON
+
+    SAVE --> BACKUP
+    BACKUP --> BAK
+    SAVE --> JSON
+    SAVE -.zablokowany.-> ERR_PERM
+
+    CREATE_EMPTY --> SCHEMA
+    JSON --> SCHEMA
+
+    ERR_JSON -.sys.exit 1.-> CLI
+    ERR_PERM -.sys.exit 1.-> CLI
+    ERR_VAL -.sys.exit 1.-> CLI
+
+    style CLI fill:#4A90E2
+    style JSON fill:#50C878
+    style BAK fill:#FFD700
+    style ERR_JSON fill:#E74C3C
+    style ERR_PERM fill:#E74C3C
+    style ERR_VAL fill:#E74C3C
+    style SCHEMA fill:#95B3D7
