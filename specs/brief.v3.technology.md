@@ -12,7 +12,7 @@ Zapewnia najszybszy interfejs dla człowieka (tryb interaktywny) i jedyny ustand
 ## Core funkcja MVP (Krok po kroku):
 
 ### Init & Backup
-Przy każdym uruchomieniu skrypt sprawdza data.json. Jeśli istnieje – robi kopię data.json.bak. Jeśli nie – tworzy pustą strukturę.
+Przy każdym zapisie do data.json skrypt tworzy kopię zapasową data.json.bak (tylko jeśli plik już istnieje). Jeśli plik nie istnieje – tworzy pustą strukturę.
 
 ### Add Transaction
 Komenda dodająca wpis (kwota, kategoria, opis, data=dziś).
@@ -129,6 +129,6 @@ python budget.py add --amount 45.00 --category "Transport" --description "Uber"
 ### Decyzje implementacyjne:
 
 1. **Single-file vs modular**: Start od `budget.py` (1 plik), refactor do `core/*` gdy przekroczy 300 linii
-2. **Atomic writes**: `shutil.copy2()` dla backupu + `json.dump()` z `atomic_write=False` (brak race conditions w MVP single-user)
+2. **Atomic writes**: `shutil.copy2()` dla backupu przed zapisem + `json.dump()` (brak race conditions w MVP single-user)
 3. **Data validation**: Pydantic odrzucony (zewnętrzna lib), validacja ręczna przez `isinstance()` i `Decimal`
 4. **Error handling**: Explicit `sys.exit(1)` z error message dla każdego edge case (czytelne dla AI agents)
