@@ -22,7 +22,13 @@ def create_empty_data():
         "next_transaction_id": 1,
         "transactions": [],
         "next_fixed_cost_id": 1,
-        "fixed_costs": []
+        "fixed_costs": [],
+        "initial_balance": 0.0,
+        "next_income_id": 1,
+        "recurring_income": [],
+        "one_time_income": [],
+        "auto_apply_recurring_income": True,
+        "applied_recurring_income_months": []
     }
 
 def migrate_data(data):
@@ -72,6 +78,45 @@ def migrate_data(data):
         data["next_fixed_cost_id"] = next_id
         migrated = True
 
+    # Add initial_balance if missing
+    if "initial_balance" not in data:
+        data["initial_balance"] = 0.0
+        migrated = True
+
+    # Add recurring_income if missing
+    if "recurring_income" not in data:
+        data["recurring_income"] = []
+        migrated = True
+
+    # Add one_time_income if missing
+    if "one_time_income" not in data:
+        data["one_time_income"] = []
+        migrated = True
+
+    # Add auto_apply_recurring_income if missing
+    if "auto_apply_recurring_income" not in data:
+        data["auto_apply_recurring_income"] = True
+        migrated = True
+
+    # Add applied_recurring_income_months if missing
+    if "applied_recurring_income_months" not in data:
+        data["applied_recurring_income_months"] = []
+        migrated = True
+
+    # Add IDs to income entries
+    if "next_income_id" not in data:
+        next_id = 1
+        for income in data.get("recurring_income", []):
+            if "id" not in income:
+                income["id"] = next_id
+                next_id += 1
+        for income in data.get("one_time_income", []):
+            if "id" not in income:
+                income["id"] = next_id
+                next_id += 1
+        data["next_income_id"] = next_id
+        migrated = True
+
     return migrated
 
 def load_data(path):
@@ -116,6 +161,12 @@ def load_data(path):
     if count > 0:
         save_data(data, path)
         print(f"Automatycznie dodano {count} kosztów stałych ({total:.2f} PLN) dla bieżącego miesiąca")
+
+    # Step 15a: Auto-apply recurring income if needed
+    income_count, income_total = auto_apply_recurring_income_if_needed(data)
+    if income_count > 0:
+        save_data(data, path)
+        print(f"Automatycznie dodano {income_count} przychodów cyklicznych ({income_total:.2f} PLN) dla bieżącego miesiąca")
 
     # Step 16: Return data
     return data
@@ -308,6 +359,237 @@ def format_transactions_list(transactions):
 
     return "\n".join(lines)
 
+# === BALANCE ===
+
+def set_initial_balance(data, amount):
+    """Set the initial portfolio balance"""
+    data["initial_balance"] = amount
+
+def calculate_total_income(data):
+    """Calculate total income from all sources (one-time only, recurring already applied as one-time)"""
+    total = Decimal(0)
+
+    # Sum all one-time income
+    for income in data.get("one_time_income", []):
+        total += Decimal(str(income["amount"]))
+
+    return total
+
+def calculate_total_expenses(data):
+    """Calculate total expenses from all transactions"""
+    total = Decimal(0)
+    for transaction in data.get("transactions", []):
+        total += Decimal(str(transaction["amount"]))
+    return total
+
+def calculate_current_balance(data):
+    """Calculate current global balance: initial + income - expenses"""
+    initial = Decimal(str(data.get("initial_balance", 0)))
+    income = calculate_total_income(data)
+    expenses = calculate_total_expenses(data)
+    return initial + income - expenses
+
+def calculate_balance_for_month(data, month_str):
+    """Calculate income and expenses for a specific month"""
+    month_income = Decimal(0)
+    month_expenses = Decimal(0)
+
+    # One-time income for the month
+    for income in data.get("one_time_income", []):
+        if income["date"].startswith(month_str):
+            month_income += Decimal(str(income["amount"]))
+
+    # Expenses for the month
+    month_transactions = filter_by_month(data["transactions"], month_str)
+    month_expenses = calculate_total(month_transactions)
+
+    return month_income, month_expenses
+
+# === RECURRING INCOME ===
+
+def add_recurring_income(data, amount, description):
+    """Add a new recurring monthly income"""
+    income = {
+        "id": data["next_income_id"],
+        "amount": amount,
+        "description": description
+    }
+    data["recurring_income"].append(income)
+    data["next_income_id"] += 1
+    return income
+
+def find_recurring_income_by_id(data, income_id):
+    """Find recurring income by ID, return None if not found"""
+    for income in data["recurring_income"]:
+        if income.get("id") == income_id:
+            return income
+    return None
+
+def edit_recurring_income(data, income_id, **kwargs):
+    """Edit recurring income fields"""
+    income = find_recurring_income_by_id(data, income_id)
+    if not income:
+        print(f"BŁĄD: Nie znaleziono przychodu cyklicznego o ID {income_id}")
+        sys.exit(1)
+
+    if "amount" in kwargs and kwargs["amount"] is not None:
+        income["amount"] = validate_amount(kwargs["amount"])
+    if "description" in kwargs and kwargs["description"] is not None:
+        income["description"] = validate_string(kwargs["description"], "Opis")
+
+    return income
+
+def delete_recurring_income(data, income_id):
+    """Delete recurring income by ID"""
+    income = find_recurring_income_by_id(data, income_id)
+    if not income:
+        print(f"BŁĄD: Nie znaleziono przychodu cyklicznego o ID {income_id}")
+        sys.exit(1)
+
+    data["recurring_income"].remove(income)
+    return income
+
+def apply_recurring_income(data, month_str=None):
+    """Apply recurring income as one-time entries for the first day of the month"""
+    if not data.get("recurring_income"):
+        print("Brak przychodów cyklicznych do dodania")
+        return (0, 0)
+
+    if month_str is None:
+        month_str = get_current_month()
+
+    # Check if already applied
+    if month_str in data.get("applied_recurring_income_months", []):
+        print(f"Przychody cykliczne dla {month_str} zostały już dodane")
+        return (0, 0)
+
+    first_day = f"{month_str}-01"
+    count = 0
+    total_amount = Decimal(0)
+
+    for recurring in data["recurring_income"]:
+        income = {
+            "id": data["next_income_id"],
+            "date": first_day,
+            "amount": recurring["amount"],
+            "description": recurring["description"]
+        }
+        data["one_time_income"].append(income)
+        data["next_income_id"] += 1
+        count += 1
+        total_amount += Decimal(str(recurring["amount"]))
+
+    # Mark month as applied
+    if "applied_recurring_income_months" not in data:
+        data["applied_recurring_income_months"] = []
+    data["applied_recurring_income_months"].append(month_str)
+
+    return (count, total_amount)
+
+def auto_apply_recurring_income_if_needed(data):
+    """Automatically apply recurring income if not yet applied for current month"""
+    if not data.get("auto_apply_recurring_income", True):
+        return (0, 0)
+
+    month_str = get_current_month()
+    if month_str in data.get("applied_recurring_income_months", []):
+        return (0, 0)
+
+    return apply_recurring_income(data, month_str)
+
+def format_recurring_income_list(recurring_income):
+    """Format list of recurring income with IDs"""
+    if not recurring_income:
+        return "Brak przychodów cyklicznych"
+
+    lines = []
+    lines.append(f"{'ID':<5} {'Kwota':<15} Opis")
+    lines.append("-" * 50)
+
+    for inc in recurring_income:
+        iid = inc.get("id", "?")
+        amount = f"{inc.get('amount', 0):.2f} PLN"
+        description = inc.get("description", "")
+        lines.append(f"{iid:<5} {amount:<15} {description}")
+
+    return "\n".join(lines)
+
+# === ONE-TIME INCOME ===
+
+def add_one_time_income(data, amount, description, income_date):
+    """Add a one-time income entry"""
+    income = {
+        "id": data["next_income_id"],
+        "date": income_date,
+        "amount": amount,
+        "description": description
+    }
+    data["one_time_income"].append(income)
+    data["next_income_id"] += 1
+    return income
+
+def find_one_time_income_by_id(data, income_id):
+    """Find one-time income by ID, return None if not found"""
+    for income in data["one_time_income"]:
+        if income.get("id") == income_id:
+            return income
+    return None
+
+def edit_one_time_income(data, income_id, **kwargs):
+    """Edit one-time income fields"""
+    income = find_one_time_income_by_id(data, income_id)
+    if not income:
+        print(f"BŁĄD: Nie znaleziono przychodu jednorazowego o ID {income_id}")
+        sys.exit(1)
+
+    if "amount" in kwargs and kwargs["amount"] is not None:
+        income["amount"] = validate_amount(kwargs["amount"])
+    if "description" in kwargs and kwargs["description"] is not None:
+        income["description"] = validate_string(kwargs["description"], "Opis")
+    if "date" in kwargs and kwargs["date"] is not None:
+        income["date"] = validate_date(kwargs["date"])
+
+    return income
+
+def delete_one_time_income(data, income_id):
+    """Delete one-time income by ID"""
+    income = find_one_time_income_by_id(data, income_id)
+    if not income:
+        print(f"BŁĄD: Nie znaleziono przychodu jednorazowego o ID {income_id}")
+        sys.exit(1)
+
+    data["one_time_income"].remove(income)
+    return income
+
+def filter_income_by_month(income_list, month_str):
+    """Filter income entries by month"""
+    filtered = []
+    for inc in income_list:
+        try:
+            if inc["date"].startswith(month_str):
+                filtered.append(inc)
+        except (KeyError, AttributeError):
+            pass
+    return filtered
+
+def format_one_time_income_list(income_list):
+    """Format list of one-time income with IDs"""
+    if not income_list:
+        return "Brak przychodów jednorazowych"
+
+    lines = []
+    lines.append(f"{'ID':<5} {'Data':<12} {'Kwota':<15} Opis")
+    lines.append("-" * 60)
+
+    for inc in income_list:
+        iid = inc.get("id", "?")
+        date_str = inc.get("date", "")
+        amount = f"{inc.get('amount', 0):.2f} PLN"
+        description = inc.get("description", "")
+        lines.append(f"{iid:<5} {date_str:<12} {amount:<15} {description}")
+
+    return "\n".join(lines)
+
 # === DISPLAY ===
 
 def calculate_detailed_status(limit, spent, month):
@@ -369,6 +651,47 @@ def format_status(limit, spent, remaining, month):
     return f"""Limit: {limit:.2f} PLN
 Wydano ({month}): {spent:.2f} PLN
 Pozostało: {remaining:.2f} PLN"""
+
+def format_status_with_balance(limit, spent, remaining, month, current_balance, month_income):
+    """Format status output with balance"""
+    month_balance = float(month_income) - float(spent)
+    return f"""Saldo portfela: {current_balance:.2f} PLN
+
+Limit ({month}): {limit:.2f} PLN
+Wydano ({month}): {spent:.2f} PLN
+Pozostało w budżecie: {remaining:.2f} PLN
+
+Przychody w miesiącu: {month_income:.2f} PLN
+Bilans miesiąca: {month_balance:.2f} PLN"""
+
+def format_detailed_status_with_balance(limit, spent, month, details, current_balance, month_income):
+    """Format detailed status output including balance information"""
+    remaining_budget = details["remaining"]
+    percent_spent = (float(spent) / float(limit) * 100) if limit > 0 else 0
+    month_balance = float(month_income) - float(spent)
+
+    output = f"""=== BUDŻET I SALDO - {month.upper()} ===
+
+SALDO PORTFELA: {current_balance:.2f} PLN
+
+BUDŻET MIESIĘCZNY:
+Limit: {limit:.2f} PLN
+Wydano: {spent:.2f} PLN ({percent_spent:.0f}%)
+Pozostało: {remaining_budget:.2f} PLN ({100-percent_spent:.0f}%)
+
+Przychody w miesiącu: {month_income:.2f} PLN
+Wydatki w miesiącu: {spent:.2f} PLN
+Bilans miesiąca: {month_balance:.2f} PLN
+
+ANALIZA CZASOWA:
+Dni w miesiącu: {details['days_in_month']}
+Upłynęło dni: {details['days_elapsed']}
+Pozostało dni: {details['days_remaining']}
+
+Średnie wydatki dziennie: {details['avg_daily']:.2f} PLN
+Sugerowany budżet dzienny (pozostałe dni): {details['suggested_daily']:.2f} PLN"""
+
+    return output
 
 def format_category_list(grouped):
     """Format category list output"""
@@ -564,6 +887,56 @@ if __name__ == "__main__":
     fixed_delete_parser = subparsers.add_parser('fixed-delete', help='Usuń koszt stały')
     fixed_delete_parser.add_argument('fixed_cost_id', type=int, help='ID kosztu stałego')
 
+    # Set-balance subcommand
+    set_balance_parser = subparsers.add_parser('set-balance', help='Ustaw początkowe saldo portfela')
+    set_balance_parser.add_argument('amount', type=float, help='Kwota początkowego salda')
+
+    # Balance subcommand
+    balance_parser = subparsers.add_parser('balance', help='Pokaż obecne saldo portfela')
+    balance_parser.add_argument('--detailed', action='store_true', help='Pokaż szczegółowe informacje z podziałem na miesiące')
+
+    # Recurring-list subcommand
+    recurring_list_parser = subparsers.add_parser('recurring-list', help='Pokaż listę przychodów cyklicznych')
+
+    # Recurring-add subcommand
+    recurring_add_parser = subparsers.add_parser('recurring-add', help='Dodaj nowy przychód cykliczny (miesięczny)')
+    recurring_add_parser.add_argument('--amount', required=True, help='Kwota')
+    recurring_add_parser.add_argument('--description', required=True, help='Opis')
+
+    # Recurring-edit subcommand
+    recurring_edit_parser = subparsers.add_parser('recurring-edit', help='Edytuj przychód cykliczny')
+    recurring_edit_parser.add_argument('income_id', type=int, help='ID przychodu cyklicznego')
+    recurring_edit_parser.add_argument('--amount', required=False, default=None, help='Nowa kwota')
+    recurring_edit_parser.add_argument('--description', required=False, default=None, help='Nowy opis')
+
+    # Recurring-delete subcommand
+    recurring_delete_parser = subparsers.add_parser('recurring-delete', help='Usuń przychód cykliczny')
+    recurring_delete_parser.add_argument('income_id', type=int, help='ID przychodu cyklicznego')
+
+    # Apply-recurring-income subcommand
+    apply_recurring_parser = subparsers.add_parser('apply-recurring-income', help='Dodaj przychody cykliczne dla bieżącego miesiąca')
+
+    # Income-add subcommand
+    income_add_parser = subparsers.add_parser('income-add', help='Dodaj przychód jednorazowy')
+    income_add_parser.add_argument('--amount', required=True, help='Kwota')
+    income_add_parser.add_argument('--description', required=True, help='Opis')
+    income_add_parser.add_argument('--date', required=False, default=None, help='Data (YYYY-MM-DD), domyślnie dziś')
+
+    # Income-list subcommand
+    income_list_parser = subparsers.add_parser('income-list', help='Pokaż listę przychodów jednorazowych')
+    income_list_parser.add_argument('--month', required=False, default=None, help='Miesiąc (YYYY-MM), domyślnie bieżący')
+
+    # Income-edit subcommand
+    income_edit_parser = subparsers.add_parser('income-edit', help='Edytuj przychód jednorazowy')
+    income_edit_parser.add_argument('income_id', type=int, help='ID przychodu jednorazowego')
+    income_edit_parser.add_argument('--amount', required=False, default=None, help='Nowa kwota')
+    income_edit_parser.add_argument('--description', required=False, default=None, help='Nowy opis')
+    income_edit_parser.add_argument('--date', required=False, default=None, help='Nowa data (YYYY-MM-DD)')
+
+    # Income-delete subcommand
+    income_delete_parser = subparsers.add_parser('income-delete', help='Usuń przychód jednorazowy')
+    income_delete_parser.add_argument('income_id', type=int, help='ID przychodu jednorazowego')
+
     # Parse arguments
     args = parser.parse_args()
 
@@ -576,11 +949,17 @@ if __name__ == "__main__":
         limit = get_limit_for_month(data, month)
         remaining = Decimal(str(limit)) - spent
 
+        # Calculate balance
+        current_balance = calculate_current_balance(data)
+        month_income, _ = calculate_balance_for_month(data, month)
+
         if args.detailed:
             details = calculate_detailed_status(limit, spent, month)
-            output = format_detailed_status(limit, spent, month, details)
+            output = format_detailed_status_with_balance(limit, spent, month, details,
+                                                         current_balance, month_income)
         else:
-            output = format_status(limit, spent, remaining, month)
+            output = format_status_with_balance(limit, spent, remaining, month,
+                                                current_balance, month_income)
 
         print(output)
 
@@ -687,3 +1066,104 @@ if __name__ == "__main__":
         fixed_cost = delete_fixed_cost(data, args.fixed_cost_id)
         save_data(data, DATA_FILE)
         print(f"Usunięto koszt stały {args.fixed_cost_id}: {fixed_cost['amount']:.2f} PLN ({fixed_cost['category']})")
+
+    # Handle set-balance command
+    elif args.command == 'set-balance':
+        amount = validate_amount(args.amount)
+        data = load_data(DATA_FILE)
+        set_initial_balance(data, amount)
+        save_data(data, DATA_FILE)
+        print(f"Ustawiono początkowe saldo portfela: {amount:.2f} PLN")
+
+    # Handle balance command
+    elif args.command == 'balance':
+        data = load_data(DATA_FILE)
+        current_balance = calculate_current_balance(data)
+
+        if args.detailed:
+            # Show monthly breakdown
+            total_income = calculate_total_income(data)
+            total_expenses = calculate_total_expenses(data)
+            initial = data.get("initial_balance", 0)
+
+            print(f"""=== SZCZEGÓŁOWE SALDO PORTFELA ===
+Początkowe saldo: {initial:.2f} PLN
+Suma wszystkich przychodów: {total_income:.2f} PLN
+Suma wszystkich wydatków: {total_expenses:.2f} PLN
+Obecne saldo: {current_balance:.2f} PLN""")
+        else:
+            print(f"Obecne saldo portfela: {current_balance:.2f} PLN")
+
+    # Handle recurring-list command
+    elif args.command == 'recurring-list':
+        data = load_data(DATA_FILE)
+        output = format_recurring_income_list(data.get("recurring_income", []))
+        print(output)
+
+    # Handle recurring-add command
+    elif args.command == 'recurring-add':
+        amount = validate_amount(args.amount)
+        description = validate_string(args.description, "Opis")
+        data = load_data(DATA_FILE)
+        income = add_recurring_income(data, amount, description)
+        save_data(data, DATA_FILE)
+        print(f"Dodano przychód cykliczny {income['id']}: {amount:.2f} PLN ({description})")
+
+    # Handle recurring-edit command
+    elif args.command == 'recurring-edit':
+        data = load_data(DATA_FILE)
+        edit_recurring_income(data, args.income_id,
+                             amount=args.amount,
+                             description=args.description)
+        save_data(data, DATA_FILE)
+        print(f"Przychód cykliczny {args.income_id} został zaktualizowany")
+
+    # Handle recurring-delete command
+    elif args.command == 'recurring-delete':
+        data = load_data(DATA_FILE)
+        income = delete_recurring_income(data, args.income_id)
+        save_data(data, DATA_FILE)
+        print(f"Usunięto przychód cykliczny {args.income_id}: {income['amount']:.2f} PLN ({income['description']})")
+
+    # Handle apply-recurring-income command
+    elif args.command == 'apply-recurring-income':
+        data = load_data(DATA_FILE)
+        count, total = apply_recurring_income(data)
+        if count > 0:
+            save_data(data, DATA_FILE)
+            print(f"Dodano {count} przychodów cyklicznych ({total:.2f} PLN)")
+
+    # Handle income-add command
+    elif args.command == 'income-add':
+        amount = validate_amount(args.amount)
+        description = validate_string(args.description, "Opis")
+        income_date = validate_date(args.date)
+        data = load_data(DATA_FILE)
+        income = add_one_time_income(data, amount, description, income_date)
+        save_data(data, DATA_FILE)
+        print(f"Dodano przychód jednorazowy {income['id']}: {amount:.2f} PLN ({description})")
+
+    # Handle income-list command
+    elif args.command == 'income-list':
+        data = load_data(DATA_FILE)
+        month = args.month if args.month else get_current_month()
+        income = filter_income_by_month(data.get("one_time_income", []), month)
+        output = format_one_time_income_list(income)
+        print(output)
+
+    # Handle income-edit command
+    elif args.command == 'income-edit':
+        data = load_data(DATA_FILE)
+        edit_one_time_income(data, args.income_id,
+                            amount=args.amount,
+                            description=args.description,
+                            date=args.date)
+        save_data(data, DATA_FILE)
+        print(f"Przychód jednorazowy {args.income_id} został zaktualizowany")
+
+    # Handle income-delete command
+    elif args.command == 'income-delete':
+        data = load_data(DATA_FILE)
+        income = delete_one_time_income(data, args.income_id)
+        save_data(data, DATA_FILE)
+        print(f"Usunięto przychód jednorazowy {args.income_id}: {income['amount']:.2f} PLN ({income['description']})")
