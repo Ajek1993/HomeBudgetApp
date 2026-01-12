@@ -842,6 +842,7 @@ if __name__ == "__main__":
 
     # List subcommand
     list_parser = subparsers.add_parser('list', help='Pokaż wydatki po kategoriach')
+    list_parser.add_argument('--month', required=False, default=None, help='Miesiąc (YYYY-MM), domyślnie bieżący')
 
     # Transactions subcommand
     transactions_parser = subparsers.add_parser('transactions', help='Pokaż listę transakcji')
@@ -985,7 +986,7 @@ if __name__ == "__main__":
     # Handle list command
     elif args.command == 'list':
         data = load_data(DATA_FILE)
-        month = get_current_month()
+        month = args.month if args.month else get_current_month()
         current_month_transactions = filter_by_month(data["transactions"], month)
         grouped = group_by_category(current_month_transactions)
         output = format_category_list(grouped)
